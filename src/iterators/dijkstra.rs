@@ -1,7 +1,7 @@
 // Copyright 2019 Chakrapani Gautam
 
-use crate::edge::Edge;
 use crate::graph::{Graph, GraphErr};
+use crate::iterators::owning_iterator::OwningIterator;
 use crate::iterators::vertices::VertexIter;
 use crate::vertex_id::VertexId;
 
@@ -9,12 +9,20 @@ use hashbrown::HashMap;
 use hashbrown::HashSet;
 
 #[cfg(not(feature = "no_std"))]
-use std::{cmp::Ordering, collections::BinaryHeap, f32, fmt::Debug, iter};
+use std::{
+    cmp::Ordering,
+    collections::{BinaryHeap, VecDeque},
+    f32,
+    fmt::Debug,
+    iter,
+};
 
 #[cfg(feature = "no_std")]
 extern crate alloc;
 #[cfg(feature = "no_std")]
-use alloc::collections::binary_heap::BinaryHeap;
+use alloc::boxed::Box;
+#[cfg(feature = "no_std")]
+use alloc::collections::{binary_heap::BinaryHeap, vec_deque::VecDeque};
 
 #[cfg(feature = "no_std")]
 use core::{cmp::Ordering, f32, fmt::Debug, iter};
@@ -39,12 +47,12 @@ impl Ord for VertexMeta {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 /// Dijkstra Single-source Shortest Path Iterator
 pub struct Dijkstra<'a, T> {
     source: &'a VertexId,
     iterable: &'a Graph<T>,
-    iterator: Vec<VertexId>,
+    iterator: VecDeque<VertexId>,
     distances: HashMap<VertexId, f32>,
     previous: HashMap<VertexId, Option<VertexId>>,
 }
@@ -66,7 +74,7 @@ impl<'a, T> Dijkstra<'a, T> {
         let mut instance = Dijkstra {
             source: src,
             iterable: graph,
-            iterator: Vec::with_capacity(graph.vertex_count()),
+            iterator: VecDeque::with_capacity(graph.vertex_count()),
             distances: HashMap::with_capacity(graph.vertex_count()),
             previous: HashMap::with_capacity(graph.vertex_count()),
         };
@@ -89,25 +97,25 @@ impl<'a, T> Dijkstra<'a, T> {
         Ok(())
     }
 
-    pub fn get_path_to(&mut self, vert: &'a VertexId) -> Result<VertexIter, GraphErr> {
+    pub fn get_path_to(mut self, vert: &'a VertexId) -> Result<VertexIter, GraphErr> {
         if self.iterable.fetch(vert).is_none() {
             return Err(GraphErr::NoSuchVertex);
         }
 
         if self.previous.contains_key(vert) {
-            let mut curr_vert = Some(vert);
+            let mut cur_vert = Some(vert);
             self.iterator.clear();
 
-            while !curr_vert.is_none() {
-                self.iterator.push(*curr_vert.unwrap());
+            while cur_vert.is_some() {
+                self.iterator.push_front(*cur_vert.unwrap());
 
-                match self.previous.get(curr_vert.unwrap()) {
-                    Some(v) => curr_vert = v.as_ref(),
-                    None => curr_vert = None,
+                match self.previous.get(cur_vert.unwrap()) {
+                    Some(v) => cur_vert = v.as_ref(),
+                    None => cur_vert = None,
                 }
             }
 
-            return Ok(VertexIter(Box::new(self.iterator.iter())));
+            return Ok(VertexIter(Box::new(OwningIterator::new(self.iterator))));
         }
 
         Ok(VertexIter(Box::new(iter::empty())))
@@ -147,20 +155,20 @@ impl<'a, T> Dijkstra<'a, T> {
                 continue;
             }
 
-            for neighbour in self.iterable.out_neighbors(&vert_meta.id) {
-                if !visited.contains(&neighbour) {
-                    let mut alt_dist = self.distances.get(&vert_meta.id).unwrap().clone();
+            for neighbor in self.iterable.out_neighbors(&vert_meta.id) {
+                if !visited.contains(&neighbor) {
+                    let mut alt_dist = *self.distances.get(&vert_meta.id).unwrap();
 
-                    if let Some(w) = self.iterable.weight(&vert_meta.id, &neighbour) {
+                    if let Some(w) = self.iterable.weight(&vert_meta.id, &neighbor) {
                         alt_dist += w;
                     }
 
-                    if alt_dist < *self.distances.get(&neighbour).unwrap() {
-                        self.distances.insert(*neighbour, alt_dist);
-                        self.previous.insert(*neighbour, Some(vert_meta.id));
+                    if alt_dist < *self.distances.get(&neighbor).unwrap() {
+                        self.distances.insert(*neighbor, alt_dist);
+                        self.previous.insert(*neighbor, Some(vert_meta.id));
 
                         vertex_pq.push(VertexMeta {
-                            id: *neighbour,
+                            id: *neighbor,
                             distance: alt_dist,
                         });
                     }
@@ -270,12 +278,12 @@ mod tests {
         let v_e = graph.add_vertex(5);
         let v_f = graph.add_vertex(6);
 
-        graph.add_edge_with_weight(&v_a, &v_b, 0.1);
-        graph.add_edge_with_weight(&v_b, &v_d, 0.2);
-        graph.add_edge_with_weight(&v_c, &v_b, 0.5);
-        graph.add_edge_with_weight(&v_c, &v_d, 0.1);
-        graph.add_edge_with_weight(&v_c, &v_e, 0.5);
-        graph.add_edge_with_weight(&v_d, &v_f, 0.8);
+        graph.add_edge_with_weight(&v_a, &v_b, 0.1).unwrap();
+        graph.add_edge_with_weight(&v_b, &v_d, 0.2).unwrap();
+        graph.add_edge_with_weight(&v_c, &v_b, 0.5).unwrap();
+        graph.add_edge_with_weight(&v_c, &v_d, 0.1).unwrap();
+        graph.add_edge_with_weight(&v_c, &v_e, 0.5).unwrap();
+        graph.add_edge_with_weight(&v_d, &v_f, 0.8).unwrap();
 
         {
             let mut iterator = Dijkstra::new(&graph, &v_a).unwrap();
@@ -288,12 +296,12 @@ mod tests {
             assert_eq!(iterator.get_distance(&v_f).unwrap(), 1.1);
         }
 
-        graph.add_edge_with_weight(&v_b, &v_a, 0.1);
-        graph.add_edge_with_weight(&v_d, &v_b, 0.2);
-        graph.add_edge_with_weight(&v_b, &v_c, 0.5);
-        graph.add_edge_with_weight(&v_d, &v_c, 0.1);
-        graph.add_edge_with_weight(&v_e, &v_c, 0.5);
-        graph.add_edge_with_weight(&v_f, &v_d, 0.8);
+        graph.add_edge_with_weight(&v_b, &v_a, 0.1).unwrap();
+        graph.add_edge_with_weight(&v_d, &v_b, 0.2).unwrap();
+        graph.add_edge_with_weight(&v_b, &v_c, 0.5).unwrap();
+        graph.add_edge_with_weight(&v_d, &v_c, 0.1).unwrap();
+        graph.add_edge_with_weight(&v_e, &v_c, 0.5).unwrap();
+        graph.add_edge_with_weight(&v_f, &v_d, 0.8).unwrap();
 
         let mut iterator = Dijkstra::new(&graph, &v_a).unwrap();
 
@@ -311,15 +319,15 @@ mod tests {
         assert_eq!(iterator.get_distance(&v_c).unwrap(), 0.0);
         assert_eq!(iterator.get_distance(&v_d).unwrap(), 0.1);
         assert_eq!(iterator.get_distance(&v_e).unwrap(), 0.5);
-        assert_eq!(iterator.get_distance(&v_f).unwrap(), 0.90000004);
+        assert_eq!(iterator.get_distance(&v_f).unwrap(), 0.900_000_04);
         // Ugh! I wish there was something like `assert_approx_eq!()`. Too lazy to write on my own.
 
-        assert_eq!(iterator.get_path_to(&v_a).unwrap().count(), 4);
-        assert_eq!(iterator.get_path_to(&v_b).unwrap().count(), 3);
-        assert_eq!(iterator.get_path_to(&v_c).unwrap().count(), 1);
-        assert_eq!(iterator.get_path_to(&v_d).unwrap().count(), 2);
-        assert_eq!(iterator.get_path_to(&v_e).unwrap().count(), 2);
-        assert_eq!(iterator.get_path_to(&v_f).unwrap().count(), 3);
+        assert_eq!(iterator.clone().get_path_to(&v_a).unwrap().count(), 4);
+        assert_eq!(iterator.clone().get_path_to(&v_b).unwrap().count(), 3);
+        assert_eq!(iterator.clone().get_path_to(&v_c).unwrap().count(), 1);
+        assert_eq!(iterator.clone().get_path_to(&v_d).unwrap().count(), 2);
+        assert_eq!(iterator.clone().get_path_to(&v_e).unwrap().count(), 2);
+        assert_eq!(iterator.clone().get_path_to(&v_f).unwrap().count(), 3);
 
         /*
         // To run these tests, uncomment and use `-- --nocapture` flag in `cargo test`
@@ -348,12 +356,12 @@ mod tests {
         let v_e = graph.add_vertex(5);
         let v_f = graph.add_vertex(6);
 
-        graph.add_edge(&v_a, &v_b);
-        graph.add_edge(&v_b, &v_d);
-        graph.add_edge(&v_c, &v_b);
-        graph.add_edge(&v_c, &v_d);
-        graph.add_edge(&v_c, &v_e);
-        graph.add_edge(&v_d, &v_f);
+        graph.add_edge(&v_a, &v_b).unwrap();
+        graph.add_edge(&v_b, &v_d).unwrap();
+        graph.add_edge(&v_c, &v_b).unwrap();
+        graph.add_edge(&v_c, &v_d).unwrap();
+        graph.add_edge(&v_c, &v_e).unwrap();
+        graph.add_edge(&v_d, &v_f).unwrap();
 
         let mut iterator = Dijkstra::new(&graph, &v_a).unwrap();
 
@@ -364,14 +372,14 @@ mod tests {
         assert_eq!(iterator.get_distance(&v_e).unwrap(), infinity);
         assert_eq!(iterator.get_distance(&v_f).unwrap(), 0.0);
 
-        assert_eq!(iterator.get_path_to(&v_a).unwrap().count(), 1);
-        assert_eq!(iterator.get_path_to(&v_b).unwrap().count(), 2);
-        assert_eq!(iterator.get_path_to(&v_c).unwrap().count(), 0);
-        assert_eq!(iterator.get_path_to(&v_d).unwrap().count(), 3);
-        assert_eq!(iterator.get_path_to(&v_e).unwrap().count(), 0);
-        assert_eq!(iterator.get_path_to(&v_f).unwrap().count(), 4);
+        assert_eq!(iterator.clone().get_path_to(&v_a).unwrap().count(), 1);
+        assert_eq!(iterator.clone().get_path_to(&v_b).unwrap().count(), 2);
+        assert_eq!(iterator.clone().get_path_to(&v_c).unwrap().count(), 0);
+        assert_eq!(iterator.clone().get_path_to(&v_d).unwrap().count(), 3);
+        assert_eq!(iterator.clone().get_path_to(&v_e).unwrap().count(), 0);
+        assert_eq!(iterator.clone().get_path_to(&v_f).unwrap().count(), 4);
 
-        iterator.set_source(&v_c);
+        iterator.set_source(&v_c).unwrap();
 
         assert_eq!(iterator.get_distance(&v_a).unwrap(), infinity);
         assert_eq!(iterator.get_distance(&v_b).unwrap(), 0.0);
@@ -380,12 +388,12 @@ mod tests {
         assert_eq!(iterator.get_distance(&v_e).unwrap(), 0.0);
         assert_eq!(iterator.get_distance(&v_f).unwrap(), 0.0);
 
-        assert_eq!(iterator.get_path_to(&v_a).unwrap().count(), 0);
-        assert_eq!(iterator.get_path_to(&v_b).unwrap().count(), 2);
-        assert_eq!(iterator.get_path_to(&v_c).unwrap().count(), 1);
-        assert_eq!(iterator.get_path_to(&v_d).unwrap().count(), 2);
-        assert_eq!(iterator.get_path_to(&v_e).unwrap().count(), 2);
-        assert_eq!(iterator.get_path_to(&v_f).unwrap().count(), 3);
+        assert_eq!(iterator.clone().get_path_to(&v_a).unwrap().count(), 0);
+        assert_eq!(iterator.clone().get_path_to(&v_b).unwrap().count(), 2);
+        assert_eq!(iterator.clone().get_path_to(&v_c).unwrap().count(), 1);
+        assert_eq!(iterator.clone().get_path_to(&v_d).unwrap().count(), 2);
+        assert_eq!(iterator.clone().get_path_to(&v_e).unwrap().count(), 2);
+        assert_eq!(iterator.clone().get_path_to(&v_f).unwrap().count(), 3);
 
         /*
         // To run these tests, uncomment and use `-- --nocapture` flag in `cargo test`

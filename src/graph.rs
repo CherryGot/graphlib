@@ -1,7 +1,7 @@
 // Copyright 2019 Octavian Oncescu
 
 use crate::edge::Edge;
-use crate::iterators::{Bfs, Dfs, Topo, VertexIter};
+use crate::iterators::*;
 use crate::vertex_id::VertexId;
 use hashbrown::{HashMap, HashSet};
 
@@ -12,13 +12,11 @@ use std::iter;
 
 #[cfg(feature = "no_std")]
 use core::fmt::Debug;
-
 #[cfg(not(feature = "no_std"))]
 use std::fmt::Debug;
 
 #[cfg(feature = "no_std")]
 use core::mem;
-
 #[cfg(not(feature = "no_std"))]
 use std::mem;
 
@@ -49,6 +47,10 @@ pub enum GraphErr {
     /// The given weight is invalid
     InvalidWeight,
 
+    /// The operation cannot be performed as it will
+    /// create a cycle in the graph.
+    CycleError,
+
     #[cfg(feature = "dot")]
     /// Could not render .dot file
     CouldNotRender,
@@ -64,7 +66,7 @@ pub enum GraphErr {
     InvalidLabel,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 /// Graph data-structure
 pub struct Graph<T> {
     /// Mapping of vertex ids and vertex values
@@ -294,7 +296,41 @@ impl<T> Graph<T> {
             return Ok(());
         }
 
-        self.do_add_edge(a, b, 0.0)
+        self.do_add_edge(a, b, 0.0, false)
+    }
+
+    /// Attempts to place a new edge in the graph, checking if the specified
+    /// edge will create a cycle in the graph. If it does, this operation will fail.
+    ///
+    /// Note that this operation has a bigger performance hit than `Graph::add_edge()`.
+    ///
+    /// ## Example
+    /// ```rust
+    /// use graphlib::{Graph, GraphErr, VertexId};
+    ///
+    /// let mut graph: Graph<usize> = Graph::new();
+    ///
+    /// // Id of vertex that is not place in the graph
+    /// let id = VertexId::random();
+    ///
+    /// let v1 = graph.add_vertex(1);
+    /// let v2 = graph.add_vertex(2);
+    ///
+    /// // Adding an edge is idempotent
+    /// graph.add_edge_check_cycle(&v1, &v2);
+    /// graph.add_edge_check_cycle(&v1, &v2);
+    /// graph.add_edge_check_cycle(&v1, &v2);
+    ///
+    /// // Fails on adding an edge which creates
+    /// // a cycle in the graph.
+    /// assert_eq!(graph.add_edge_check_cycle(&v2, &v1), Err(GraphErr::CycleError));
+    /// ```
+    pub fn add_edge_check_cycle(&mut self, a: &VertexId, b: &VertexId) -> Result<(), GraphErr> {
+        if self.has_edge(a, b) {
+            return Ok(());
+        }
+
+        self.do_add_edge(a, b, 0.0, true)
     }
 
     /// Attempts to place a new edge in the graph.
@@ -332,7 +368,7 @@ impl<T> Graph<T> {
             return Err(GraphErr::InvalidWeight);
         }
 
-        self.do_add_edge(a, b, weight)
+        self.do_add_edge(a, b, weight, false)
     }
 
     /// Returns the weight of the specified edge
@@ -361,7 +397,7 @@ impl<T> Graph<T> {
             return None;
         }
 
-        if let Some(result) = self.edges.get(&Edge::new(a.clone(), b.clone())) {
+        if let Some(result) = self.edges.get(&Edge::new(*a, *b)) {
             Some(*result)
         } else {
             None
@@ -406,8 +442,7 @@ impl<T> Graph<T> {
             return Err(GraphErr::InvalidWeight);
         }
 
-        self.edges
-            .insert(Edge::new(a.clone(), b.clone()), new_weight);
+        self.edges.insert(Edge::new(*a, *b), new_weight);
 
         // Sort outbound vertices after setting a new weight
         let mut outbounds = self.outbound_table.get(a).unwrap().clone();
@@ -642,7 +677,7 @@ impl<T> Graph<T> {
             self.tips.insert(a.clone());
         }
 
-        self.edges.remove(&Edge::new(a.clone(), b.clone()));
+        self.edges.remove(&Edge::new(*a, *b));
     }
 
     /// Iterates through the graph and only keeps
@@ -738,7 +773,7 @@ impl<T> Graph<T> {
         graph.vertices = self
             .vertices
             .iter()
-            .map(|(id, (v, i))| (id.clone(), (fun(v), i.clone())))
+            .map(|(id, (v, i))| (*id, (fun(v), *i)))
             .collect();
 
         #[cfg(feature = "dot")]
@@ -921,8 +956,8 @@ impl<T> Graph<T> {
     ///
     /// ## Example
     /// ```rust
-    /// # #[macro_use] extern crate graphlib; fn main() {
-    /// # use std::collections::HashSet;
+    /// #[macro_use] extern crate graphlib;
+    /// use std::collections::HashSet;
     /// use graphlib::Graph;
     ///
     /// let mut graph: Graph<usize> = Graph::new();
@@ -937,7 +972,6 @@ impl<T> Graph<T> {
     /// graph.add_edge(&v1, &v4).unwrap();
     ///
     /// assert!(set![&v2, &v4] == graph.out_neighbors(&v1).collect());
-    /// # }
     /// ```
     pub fn out_neighbors(&self, id: &VertexId) -> VertexIter<'_> {
         match self.outbound_table.get(id) {
@@ -951,8 +985,8 @@ impl<T> Graph<T> {
     ///
     /// ## Example
     /// ```rust
-    /// # #[macro_use] extern crate graphlib; fn main() {
-    /// # use std::collections::HashSet;
+    /// #[macro_use] extern crate graphlib;
+    /// use std::collections::HashSet;
     /// use graphlib::Graph;
     ///
     /// let mut graph: Graph<usize> = Graph::new();
@@ -967,7 +1001,6 @@ impl<T> Graph<T> {
     /// graph.add_edge(&v1, &v4).unwrap();
     ///
     /// assert!(set![&v2, &v4, &v3] == graph.neighbors(&v1).collect());
-    /// # }
     /// ```
     pub fn neighbors(&self, id: &VertexId) -> VertexIter<'_> {
         let mut visited = HashSet::new();
@@ -1047,8 +1080,8 @@ impl<T> Graph<T> {
     ///
     /// ## Example
     /// ```rust
-    /// # #[macro_use] extern crate graphlib; fn main() {
-    /// # use std::collections::HashSet;
+    /// #[macro_use] extern crate graphlib;
+    /// use std::collections::HashSet;
     /// use graphlib::Graph;
     ///
     /// let mut graph: Graph<usize> = Graph::new();
@@ -1070,7 +1103,6 @@ impl<T> Graph<T> {
     ///
     /// assert_eq!(tips.len(), 2);
     /// assert_eq!(tips, set![&v2, &v4]);
-    /// # }
     /// ```
     pub fn tips(&self) -> VertexIter<'_> {
         VertexIter(Box::new(self.tips.iter().map(AsRef::as_ref)))
@@ -1108,7 +1140,7 @@ impl<T> Graph<T> {
     ///
     /// ## Example
     /// ```rust
-    /// # #[macro_use] extern crate graphlib; fn main() {
+    /// #[macro_use] extern crate graphlib;
     /// use graphlib::Graph;
     /// use std::collections::HashSet;
     ///
@@ -1128,7 +1160,6 @@ impl<T> Graph<T> {
     /// assert_eq!(dfs.next(), Some(&v3));
     /// assert_eq!(dfs.next(), Some(&v1));
     /// assert!(set![&v2, &v4] == dfs.collect());
-    /// # }
     /// ```
     pub fn dfs(&self) -> Dfs<'_, T> {
         Dfs::new(self)
@@ -1191,7 +1222,7 @@ impl<T> Graph<T> {
     ///
     /// ## Example
     /// ```rust
-    /// # #[macro_use] extern crate graphlib; fn main() {
+    /// #[macro_use] extern crate graphlib;
     /// use graphlib::Graph;
     /// use std::collections::HashSet;
     ///
@@ -1211,15 +1242,85 @@ impl<T> Graph<T> {
     /// assert_eq!(topo.next(), Some(&v1));
     /// assert_eq!(topo.next(), Some(&v2));
     /// assert!(set![&v3, &v4] == topo.collect());
-    /// # }
     /// ```
     pub fn topo(&self) -> Topo<'_, T> {
         Topo::new(self)
     }
 
+    /// Returns an iterator over the shortest path from the source
+    /// vertex to the destination vertex. The iterator will yield
+    /// `None` if there is no such path or the provided vertex ids
+    /// do not belong to any vertices in the graph.
+    /// ## Example
+    /// ```rust
+    /// #[macro_use] extern crate graphlib;
+    /// use graphlib::Graph;
+    /// use std::collections::HashSet;
+    ///
+    /// let mut graph: Graph<usize> = Graph::new();
+    ///
+    /// let v1 = graph.add_vertex(1);
+    /// let v2 = graph.add_vertex(2);
+    /// let v3 = graph.add_vertex(3);
+    /// let v4 = graph.add_vertex(4);
+    /// let v5 = graph.add_vertex(5);
+    /// let v6 = graph.add_vertex(6);
+    ///
+    /// graph.add_edge(&v1, &v2).unwrap();
+    /// graph.add_edge(&v2, &v3).unwrap();
+    /// graph.add_edge(&v3, &v4).unwrap();
+    /// graph.add_edge(&v3, &v5).unwrap();
+    /// graph.add_edge(&v5, &v6).unwrap();
+    /// graph.add_edge(&v6, &v4).unwrap();
+    ///
+    /// let mut dijkstra = graph.dijkstra(&v1, &v4);
+    ///
+    /// assert_eq!(dijkstra.next(), Some(&v1));
+    /// assert_eq!(dijkstra.next(), Some(&v2));
+    /// assert_eq!(dijkstra.next(), Some(&v3));
+    /// assert_eq!(dijkstra.next(), Some(&v4));
+    /// assert_eq!(dijkstra.next(), None);
+    /// ```
+    pub fn dijkstra<'a>(&'a self, src: &'a VertexId, dest: &'a VertexId) -> VertexIter<'a> {
+        if let Some(dijkstra) = Dijkstra::new(&self, src).ok() {
+            if let Some(iter) = dijkstra.get_path_to(dest).ok() {
+                iter
+            } else {
+                VertexIter(Box::new(iter::empty()))
+            }
+        } else {
+            VertexIter(Box::new(iter::empty()))
+        }
+    }
+
+    /// Returns an iterator over the values of the vertices
+    /// placed in the graph.
+    ///
+    /// ## Example
+    /// ```rust
+    /// #[macro_use] extern crate graphlib;
+    /// use graphlib::Graph;
+    /// use std::collections::HashSet;
+    ///
+    /// let mut graph: Graph<usize> = Graph::new();
+    ///
+    /// let v1 = graph.add_vertex(1);
+    /// let v2 = graph.add_vertex(2);
+    /// let v3 = graph.add_vertex(3);
+    ///
+    /// let mut values = graph.values();
+    ///
+    /// assert!(set![&1, &2, &3] == values.collect());
+    /// ```
+    pub fn values(&self) -> ValuesIter<'_, T> {
+        let iter = self.vertices.values().map(|(v, _)| v);
+
+        ValuesIter(Box::new(iter))
+    }
+
     #[cfg(feature = "dot")]
     /// Creates a file with the dot representation of the graph.
-    /// This method requires the `dot` feature.
+    /// This method requires the `dot` crate feature.
     ///
     /// ## Example
     /// ```rust
@@ -1268,6 +1369,8 @@ impl<T> Graph<T> {
     #[cfg(feature = "dot")]
     /// Labels the vertex with the given id. Returns the old label if successful.
     ///
+    /// This method requires the `dot` crate feature.
+    ///
     /// ## Example
     /// ```rust
     /// use graphlib::{Graph, VertexId};
@@ -1300,6 +1403,8 @@ impl<T> Graph<T> {
 
     #[cfg(feature = "dot")]
     /// Retrieves the label of the vertex with the given id.
+    ///
+    /// This method requires the `dot` crate feature.
     ///
     /// This function will return a default label if no label is set. Returns
     /// `None` if there is no vertex associated with the given id in the graph.
@@ -1334,6 +1439,8 @@ impl<T> Graph<T> {
 
     #[cfg(feature = "dot")]
     /// Maps each label that is placed on a vertex to a new label.
+    ///
+    /// This method requires the `dot` crate feature.
     ///
     /// ```rust
     /// use std::collections::HashMap;
@@ -1389,20 +1496,26 @@ impl<T> Graph<T> {
         }
     }
 
-    fn do_add_edge(&mut self, a: &VertexId, b: &VertexId, weight: f32) -> Result<(), GraphErr> {
+    fn do_add_edge(
+        &mut self,
+        a: &VertexId,
+        b: &VertexId,
+        weight: f32,
+        check_cycle: bool,
+    ) -> Result<(), GraphErr> {
         let id_ptr1 = if self.vertices.get(a).is_some() {
-            a.clone()
+            *a
         } else {
             return Err(GraphErr::NoSuchVertex);
         };
 
         let id_ptr2 = if self.vertices.get(b).is_some() {
-            b.clone()
+            *b
         } else {
             return Err(GraphErr::NoSuchVertex);
         };
 
-        let edge = Edge::new(id_ptr1.clone(), id_ptr2.clone());
+        let edge = Edge::new(id_ptr1, id_ptr2);
 
         // Push edge
         self.edges.insert(edge, weight);
@@ -1417,8 +1530,7 @@ impl<T> Graph<T> {
                 self.outbound_table.insert(id_ptr1.clone(), outbounds);
             }
             None => {
-                self.outbound_table
-                    .insert(id_ptr1.clone(), vec![id_ptr2.clone()]);
+                self.outbound_table.insert(id_ptr1.clone(), vec![id_ptr2]);
             }
         }
 
@@ -1433,10 +1545,33 @@ impl<T> Graph<T> {
         }
 
         // Remove outbound vertex from roots
-        self.roots.remove(&b);
+        let was_root = self.roots.remove(&b);
 
         // Remove inbound vertex from tips
-        self.tips.remove(&a);
+        let was_tip = self.tips.remove(&a);
+
+        let mut is_cyclic = false;
+
+        if check_cycle {
+            let mut dfs = Dfs::new(&self);
+            is_cyclic = dfs.is_cyclic();
+        }
+
+        // Roll-back changes if cycle check succeeds
+        if is_cyclic {
+            // Remove from edge table
+            self.remove_edge(a, b);
+
+            if was_root {
+                self.roots.insert(b.clone());
+            }
+
+            if was_tip {
+                self.tips.insert(a.clone());
+            }
+
+            return Err(GraphErr::CycleError);
+        }
 
         Ok(())
     }
@@ -1444,15 +1579,7 @@ impl<T> Graph<T> {
     fn sort_outbounds(&self, inbound: VertexId, outbounds: &mut Vec<VertexId>) {
         let outbound_weights: HashMap<VertexId, f32> = outbounds
             .iter()
-            .map(|id| {
-                (
-                    id.clone(),
-                    *self
-                        .edges
-                        .get(&Edge::new(inbound.clone(), id.clone()))
-                        .unwrap(),
-                )
-            })
+            .map(|id| (*id, *self.edges.get(&Edge::new(inbound, *id)).unwrap()))
             .collect();
 
         // Sort outbounds
@@ -1463,11 +1590,11 @@ impl<T> Graph<T> {
             match (a_weight, b_weight) {
                 // Sort normally if both weights are set
                 (Some(a_weight), Some(b_weight)) => {
-                    a_weight.partial_cmp(&b_weight).unwrap_or(a.cmp(b))
+                    a_weight.partial_cmp(&b_weight).unwrap_or_else(|| a.cmp(b))
                 }
                 (Some(weight), None) => {
                     if weight != 0.00 {
-                        weight.partial_cmp(&0.00).unwrap_or(a.cmp(b))
+                        weight.partial_cmp(&0.00).unwrap_or_else(|| a.cmp(b))
                     } else {
                         // Fallback to lexicographic sort
                         a.cmp(b)
@@ -1475,7 +1602,7 @@ impl<T> Graph<T> {
                 }
                 (None, Some(weight)) => {
                     if weight != 0.00 {
-                        weight.partial_cmp(&0.00).unwrap_or(a.cmp(b))
+                        weight.partial_cmp(&0.00).unwrap_or_else(|| a.cmp(b))
                     } else {
                         // Fallback to lexicographic sort
                         a.cmp(b)
@@ -1491,7 +1618,7 @@ impl<T> Graph<T> {
     /// which is equal to the given `VertexId`.
     pub(crate) fn fetch_id_ref<'b>(&'b self, id: &VertexId) -> Option<&'b VertexId> {
         match self.vertices.get(id) {
-            Some((_, id_ptr)) => Some(id_ptr.as_ref()),
+            Some((_, id_ptr)) => Some(id_ptr),
             None => None,
         }
     }
@@ -1602,7 +1729,7 @@ mod tests {
         graph.remove_edge(&v3, &v1);
 
         assert_eq!(old_inbound, graph.inbound_table.clone());
-        assert_eq!(old_outbound, graph.outbound_table.clone());
+        assert_eq!(old_outbound, graph.outbound_table);
     }
 
     #[test]
@@ -1641,5 +1768,37 @@ mod tests {
                 panic!("graph and clone of graph are not equal!");
             }
         }
+    }
+
+    #[test]
+    fn test_add_edge_cycle_check() {
+        let mut graph: Graph<usize> = Graph::new();
+
+        // Id of vertex that is not place in the graph
+        let id = VertexId::random();
+
+        let v1 = graph.add_vertex(1);
+        let v2 = graph.add_vertex(2);
+
+        // Adding an edge is idempotent
+        graph.add_edge_check_cycle(&v1, &v2).unwrap();
+        graph.add_edge_check_cycle(&v1, &v2).unwrap();
+        graph.add_edge_check_cycle(&v1, &v2).unwrap();
+
+        let mut graph2 = graph.clone();
+
+        // Fails on adding an edge which creates
+        // a cycle in the graph.
+        assert_eq!(
+            graph2.add_edge_check_cycle(&v2, &v1),
+            Err(GraphErr::CycleError)
+        );
+
+        // Check that the graph state has rolled back
+        assert_eq!(graph.edges, graph2.edges);
+        assert_eq!(graph.roots, graph2.roots);
+        assert_eq!(graph.tips, graph2.tips);
+        assert_eq!(graph.inbound_table, graph2.inbound_table);
+        assert_eq!(graph.outbound_table, graph2.outbound_table);
     }
 }
